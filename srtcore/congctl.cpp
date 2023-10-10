@@ -342,8 +342,7 @@ private:
     /// Handle icoming ACK event.
     /// In slow start stage increase CWND. Leave slow start once maximum CWND is reached.
     /// In congestion avoidance stage adjust inter packet send interval value to achieve maximum rate.
-    void onACK(ETransmissionEvent, EventVariant arg)
-    {
+    void onACK(ETransmissionEvent, EventVariant arg) {
         const int ack = arg.get<EventVariant::ACK>();
 
         const steady_clock::time_point currtime = steady_clock::now();

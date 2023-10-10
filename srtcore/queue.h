@@ -552,6 +552,7 @@ private:
     CUDT* getNewEntry();
 
     void storePktClone(int32_t id, const CPacket& pkt);
+    bool retrieveStoredPkt(int32_t id, int32_t sn, CPacket*& pkt);
 
 private:
     sync::Mutex       m_LSLock;
@@ -561,7 +562,7 @@ private:
     std::vector<CUDT*> m_vNewEntry; // newly added entries, to be inserted
     sync::Mutex        m_IDLock;
 
-    std::map<int32_t, std::queue<CPacket*> > m_mBuffer; // temporary buffer for rendezvous connection request
+    std::map<int32_t, std::list<CPacket*> > m_mBuffer; // temporary buffer for rendezvous connection request
     sync::Mutex                              m_BufferLock;
     sync::Condition                          m_BufferCond;
 

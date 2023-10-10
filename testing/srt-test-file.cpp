@@ -106,7 +106,7 @@ int main( int argc, char** argv )
         return 1;
     }
 
-    string loglevel = Option<OutString>(params, "error", o_loglevel);
+    string loglevel = Option<OutString>(params, "debug", o_loglevel);
     srt_logging::LogLevel::type lev = SrtParseLogLevel(loglevel);
     srt::setloglevel(lev);
     srt::addlogfa(SRT_LOGFA_APP);
@@ -312,12 +312,12 @@ bool DoDownload(UriParser& us, string directory, string filename)
 {
     SrtModel m(us.host(), us.portno(), us.parameters());
 
-    string id = filename;
+    string id = "?Get=" + filename;
     m.Establish((id));
 
     // Disregard the filename, unless the destination file exists.
 
-    string path = directory + "/" + id;
+    string path = directory + "/" + filename;
     struct stat state;
     if ( stat(path.c_str(), &state) == -1 )
     {
@@ -339,7 +339,7 @@ bool DoDownload(UriParser& us, string directory, string filename)
         if (!S_ISREG(state.st_mode))
         {
             cerr << "Download: target location '" << path << "' does not designate a regular file.\n";
-            return false;
+            //return false;
         }
     }
 

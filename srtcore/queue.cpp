@@ -174,6 +174,8 @@ srt::CUnit* srt::CUnitQueue::getNextAvailUnit()
         {
             if (!m_pAvailUnit->m_bTaken)
             {
+                HLOGC(rslog.Debug, log << "yyy getNextAvailUnit " << m_pAvailUnit
+                        << ", from " << m_pCurrQueue->m_iSize);
                 return m_pAvailUnit;
             }
         }
@@ -549,6 +551,12 @@ void* srt::CSndQueue::worker(void* param)
         IF_DEBUG_HIGHRATE(CSndQueueDebugHighratePrint(self, currtime));
         if (currtime < next_time)
         {
+            HLOGC(qslog.Debug,
+                log << "yyy sleep " << (next_time - currtime).count()
+                << " CSndQueue: currtime " << currtime.time_since_epoch().count()
+                << " (" << srt::sync::FormatTimeSys(currtime)
+                << ") < next_time " << next_time.time_since_epoch().count()
+                << " ("<< srt::sync::FormatTimeSys(next_time) << ")");
             THREAD_PAUSED();
             self->m_pTimer->sleep_until(next_time);
             THREAD_RESUMED();
@@ -591,7 +599,9 @@ void* srt::CSndQueue::worker(void* param)
 
         const sockaddr_any addr = u->m_PeerAddr;
         if (!is_zero(next_send_time))
+        {
             self->m_pSndUList->update(u, CSndUList::DO_RESCHEDULE, next_send_time);
+        }
 
         HLOGC(qslog.Debug, log << self->CONID() << "chn:SENDING: " << pkt.Info());
         self->m_pChannel->sendto(addr, pkt, source_addr);
@@ -1157,13 +1167,13 @@ srt::CRcvQueue::~CRcvQueue()
     delete m_pRendezvousQueue;
 
     // remove all queued messages
-    for (map<int32_t, std::queue<CPacket*> >::iterator i = m_mBuffer.begin(); i != m_mBuffer.end(); ++i)
+    for (auto i = m_mBuffer.begin(); i != m_mBuffer.end(); ++i)
     {
         while (!i->second.empty())
         {
             CPacket* pkt = i->second.front();
             delete pkt;
-            i->second.pop();
+            i->second.pop_front();
         }
     }
 }
@@ -1353,7 +1363,8 @@ srt::EReadStatus srt::CRcvQueue::worker_RetrieveUnit(int32_t& w_id, CUnit*& w_un
         {
             HLOGC(qrlog.Debug,
                   log << CUDTUnited::CONID(ne->m_SocketID)
-                      << " SOCKET pending for connection - ADDING TO RCV QUEUE/MAP");
+                      << " SOCKET pending for connection - ADDING TO RCV QUEUE/MAP"
+                      << ": @" << ne->m_SocketID);
             m_pRcvUList->insert(ne);
             m_pHash->insert(ne->m_SocketID, ne);
         }
@@ -1577,7 +1588,8 @@ srt::EConnectStatus srt::CRcvQueue::worker_TryAsyncRend_OrStore(int32_t id, CUni
             {
                 HLOGC(cnlog.Debug,
                       log << CUDTUnited::CONID(ne->m_SocketID)
-                          << " SOCKET pending for connection - ADDING TO RCV QUEUE/MAP");
+                          << " SOCKET pending for connection - ADDING TO RCV QUEUE/MAP"
+                          << ": @" << ne->m_SocketID);
                 m_pRcvUList->insert(ne);
                 m_pHash->insert(ne->m_SocketID, ne);
 
@@ -1639,7 +1651,7 @@ int srt::CRcvQueue::recvfrom(int32_t id, CPacket& w_packet)
 {
     CUniqueSync buffercond(m_BufferLock, m_BufferCond);
 
-    map<int32_t, std::queue<CPacket*> >::iterator i = m_mBuffer.find(id);
+    auto i = m_mBuffer.find(id);
 
     if (i == m_mBuffer.end())
     {
@@ -1681,7 +1693,7 @@ int srt::CRcvQueue::recvfrom(int32_t id, CPacket& w_packet)
 
     // remove this message from queue,
     // if no more messages left for this socket, release its data structure
-    i->second.pop();
+    i->second.pop_front();
     if (i->second.empty())
         m_mBuffer.erase(i);
 
@@ -1724,7 +1736,7 @@ void srt::CRcvQueue::removeConnector(const SRTSOCKET& id)
 
     ScopedLock bufferlock(m_BufferLock);
 
-    map<int32_t, std::queue<CPacket*> >::iterator i = m_mBuffer.find(id);
+    auto i = m_mBuffer.find(id);
     if (i != m_mBuffer.end())
     {
         HLOGC(cnlog.Debug,
@@ -1732,7 +1744,7 @@ void srt::CRcvQueue::removeConnector(const SRTSOCKET& id)
         while (!i->second.empty())
         {
             delete i->second.front();
-            i->second.pop();
+            i->second.pop_front();
         }
         m_mBuffer.erase(i);
     }
@@ -1767,21 +1779,61 @@ void srt::CRcvQueue::storePktClone(int32_t id, const CPacket& pkt)
 {
     CUniqueSync passcond(m_BufferLock, m_BufferCond);
 
-    map<int32_t, std::queue<CPacket*> >::iterator i = m_mBuffer.find(id);
+    auto item = m_mBuffer.find(id);
 
-    if (i == m_mBuffer.end())
+    if (item == m_mBuffer.end())
     {
-        m_mBuffer[id].push(pkt.clone());
+        m_mBuffer[id].push_back(pkt.clone());
+        HLOGC(cnlog.Warn, log << "yyy storePktClone "
+            << pkt.getSeqNo()<< " for id @" << id);
         passcond.notify_one();
     }
     else
     {
         // Avoid storing too many packets, in case of malfunction or attack.
-        if (i->second.size() > 16)
+        if (item->second.size() > 64)
             return;
 
-        i->second.push(pkt.clone());
+        item->second.push_back(pkt.clone());
+        HLOGC(cnlog.Warn, log << "yyy storePktClone "
+            << pkt.getSeqNo()<< " for id @" << id
+            << ", size=" << item->second.size());
     }
+}
+
+bool srt::CRcvQueue::retrieveStoredPkt(int32_t id, int32_t sn, CPacket*& pkt)
+{
+    pkt = nullptr;
+    CUniqueSync passcond(m_BufferLock, m_BufferCond);
+
+    auto item = m_mBuffer.find(id);
+
+    if (item== m_mBuffer.end())
+    {
+        HLOGC(cnlog.Warn, log << "yyy retrieveStoredPkt "
+            << sn << " for id @" << id
+            << ", none");
+        return false;
+    }
+    else
+    {
+        for (auto it = item->second.begin(); it != item->second.end(); ++it)
+        {
+            HLOGC(cnlog.Warn, log << "yyy retrieveStoredPkt "
+                << (*it)->getSeqNo() << " for id @" << id);
+            if ((*it)->getSeqNo() == sn)
+            {
+                pkt = *it;
+                HLOGC(cnlog.Warn, log << "yyy retrieveStoredPkt "
+                    << pkt->getSeqNo() << " for id @" << id
+                    << ", found");
+                item->second.erase(it);
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 void srt::CMultiplexer::destroy()

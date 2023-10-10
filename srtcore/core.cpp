@@ -3839,6 +3839,8 @@ void srt::CUDT::startConnect(const sockaddr_any& serv_addr, int32_t forced_isn)
         m_bConnecting = false;
         // The process is to be abnormally terminated, remove the connector
         // now because most likely no other processing part has done anything with it.
+        HLOGC(cnlog.Debug,
+              log << CONID() << "yyy startConnect: removeConnector" << m_SocketID);
         m_pRcvQueue->removeConnector(m_SocketID);
         throw e;
     }
@@ -4871,7 +4873,7 @@ EConnectStatus srt::CUDT::postConnect(const CPacket* pResponse, bool rendezvous,
     // because otherwise the packets that are coming for this socket before the
     // connection process is complete will be rejected as "attack", instead of
     // being enqueued for later pickup from the queue.
-    m_pRcvQueue->removeConnector(m_SocketID);
+    //m_pRcvQueue->removeConnector(m_SocketID);
 
     // Ok, no more things to be done as per "clear connecting state"
     if (!s)
@@ -6270,6 +6272,8 @@ bool srt::CUDT::closeInternal()
     }
     else if (m_bConnecting)
     {
+        HLOGC(cnlog.Debug,
+              log << CONID() << "yyy closeInternal: removeConnector" << m_SocketID);
         m_pRcvQueue->removeConnector(m_SocketID);
     }
 
@@ -9659,6 +9663,11 @@ bool srt::CUDT::packData(CPacket& w_packet, steady_clock::time_point& w_nexttime
     {
 #if USE_BUSY_WAITING
         m_tsNextSendTime = enter_time + m_tdSendInterval.load();
+        HLOGC(qslog.Debug, log << "packData: USE_BUSY_WAITING m_tsNextSendTime "
+                << m_tsNextSendTime.time_since_epoch().count()
+                << " = "
+                << enter_time.time_since_epoch().count()
+                << " + " m_tdSendInterval.load());
 #else
         const duration sendbrw = m_tdSendTimeDiff;
 
@@ -9666,6 +9675,12 @@ bool srt::CUDT::packData(CPacket& w_packet, steady_clock::time_point& w_nexttime
         {
             // Send immediately
             m_tsNextSendTime = enter_time;
+            HLOGC(qslog.Debug, log << "packData: sendbrw ("
+                    << sendbrw.count()
+                    << ") >= sendint ("
+                    << sendint.count()
+                    << "), m_tsNextSendTime="
+                    << m_tsNextSendTime.time_since_epoch().count());
 
             // ATOMIC NOTE: this is the only thread that
             // modifies this field
@@ -9674,11 +9689,19 @@ bool srt::CUDT::packData(CPacket& w_packet, steady_clock::time_point& w_nexttime
         else
         {
             m_tsNextSendTime = enter_time + (sendint - sendbrw);
-            m_tdSendTimeDiff = duration();
+             HLOGC(qslog.Debug, log << "packData: sendbrw ("
+                    << sendbrw.count()
+                    << ") < sendint ("
+                    << sendint.count()
+                    << "), m_tsNextSendTime="
+                    << m_tsNextSendTime.time_since_epoch().count());
+
+           m_tdSendTimeDiff = duration();
         }
 #endif
     }
-    HLOGC(qslog.Debug, log << "packData: Setting source address: " << m_SourceAddr.str());
+    HLOGC(qslog.Debug, log << "packData: Setting source address: " << m_SourceAddr.str()
+            << ", m_tsNextSendTime=" << m_tsNextSendTime.time_since_epoch().count());
     w_src_addr = m_SourceAddr;
     w_nexttime = m_tsNextSendTime;
 
@@ -10336,7 +10359,58 @@ int srt::CUDT::processData(CUnit* in_unit)
     // supply the missing packet(s), and the loss will no longer be visible for the code that follows.
     if (packet.getMsgSeq(m_bPeerRexmitFlag) != SRT_MSGNO_CONTROL) // disregard filter-control packets, their seq may mean nothing
     {
+        // Difference between these two sequence numbers is expected to be:
+        // 0 - duplicated last packet (theory only)
+        // 1 - subsequent packet (alright)
+        // <0 - belated or recovered packet
+        // >1 - jump over a packet loss (loss = seqdiff-1)
+        if (CSeqNo::seqoff(m_iRcvCurrPhySeqNo, packet.m_iSeqNo) > 1)
+        {
+            CPacket *pkt = nullptr;
+            // TODO: for (int32_t n = m_iRcvCurrPhySeqNo + 1; n < packet.m_iSeqNo; ++n)
+            {
+                m_pRcvQueue->retrieveStoredPkt(m_SocketID, CSeqNo::decseq(packet.m_iSeqNo), pkt);
+                if (pkt)
+                {
+                    m_pRcvQueue->m_pUnitQueue->makeUnitTaken(in_unit);
+                    CUnit* u = m_pRcvQueue->m_pUnitQueue->getNextAvailUnit();
+                    if (!u)
+                    {
+                        LOGC(qrlog.Error, log << "LOCAL STORAGE DEPLETED. Can't return retrieved packets.");
+                    }
+                    else
+                    {
+                        // LOCK the unit as taken because otherwise the next
+                        // call to getNextAvailUnit will return THE SAME UNIT.
+                        //m_pRcvQueue->m_pUnitQueue->makeUnitTaken(u);
+                        // After returning from this function, all units will be
+                        // set back to FREE so that the buffer can decide whether
+                        // it wants them or not.
+
+                        CPacket& new_packet = u->m_Packet;
+
+                        memcpy((new_packet.getHeader()), pkt->getHeader(), CPacket::HDR_SIZE);
+                        memcpy((new_packet.m_pcData), pkt->m_pcData, pkt->getLength());
+                        new_packet.setLength(pkt->getLength());
+
+                        HLOGC(qrlog.Debug, log << "PROVIDING retrieved packet %" << new_packet.getSeqNo());
+
+                        processData(u);  // recursively process packet unit.
+                        m_pRcvQueue->m_pUnitQueue->makeUnitFree(in_unit);
+                        HLOGC(qrlog.Debug, log << "finished PROVIDING retrieved packet %" << new_packet.getSeqNo());
+#if 0
+                        incoming.push_back(u);
+#endif  // 0
+                    }
+                }
+            }
+        }
+
         const int diff = CSeqNo::seqoff(m_iRcvCurrPhySeqNo, packet.m_iSeqNo);
+        HLOGC(qrlog.Debug,
+              log << CONID() << "yyy m_iRcvCurrPhySeqNo " << m_iRcvCurrPhySeqNo
+              << ", packet.m_iSeqNo " << packet.m_iSeqNo
+              << ", diff=" << diff);
         // Difference between these two sequence numbers is expected to be:
         // 0 - duplicated last packet (theory only)
         // 1 - subsequent packet (alright)
@@ -10359,6 +10433,9 @@ int srt::CUDT::processData(CUnit* in_unit)
         {
             // Record if it was further than latest
             m_iRcvCurrPhySeqNo = packet.m_iSeqNo;
+            HLOGC(qrlog.Debug,
+                  log << CONID() << "yyy m_iRcvCurrPhySeqNo=" << m_iRcvCurrPhySeqNo
+                  << ", diff=" << diff);
         }
     }
 
@@ -10431,6 +10508,8 @@ int srt::CUDT::processData(CUnit* in_unit)
                 (was_sent_in_order),
                 (srt_loss_seqs));
 
+        HLOGC(qrlog.Debug,
+              log << CONID() << "yyy handleSocketPacketReception res " << res);
         if (res == -2)
         {
             // This is a scoped lock with AckLock, but for the moment

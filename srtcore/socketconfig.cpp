@@ -681,6 +681,7 @@ struct CSrtConfigSetter<SRTO_TRANSTYPE>
             co.Linger.l_onoff  = 0;
             co.Linger.l_linger = 0;
             co.sCongestion.set("live", 4);
+            LOGC(srt_logging::aclog.Warn, log << "yyy SRTT_LIVE");
             break;
 
         case SRTT_FILE:
@@ -702,6 +703,7 @@ struct CSrtConfigSetter<SRTO_TRANSTYPE>
             co.Linger.l_onoff  = 1;
             co.Linger.l_linger = CSrtConfig::DEF_LINGER_S;
             co.sCongestion.set("file", 4);
+            LOGC(srt_logging::aclog.Warn, log << "yyy SRTT_FILE");
             break;
 
         default:

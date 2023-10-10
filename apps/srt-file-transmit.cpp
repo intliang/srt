@@ -31,6 +31,7 @@ written by
 #include <common.h>
 
 #include "apputil.hpp"
+#include "logging.h"
 #include "uriparser.hpp"
 #include "logsupport.hpp"
 #include "socketoptions.hpp"
@@ -42,6 +43,8 @@ written by
 #define S_ISDIR(mode)  (((mode) & S_IFMT) == S_IFDIR)
 #endif
 
+const srt_logging::LogFA SRT_LOGFA_APP = 10;
+srt_logging::Logger applog(SRT_LOGFA_APP, srt_logger_config, "file-transmit-log");
 
 using namespace std;
 
@@ -281,6 +284,9 @@ bool DoUpload(UriParser& ut, string path, string filename,
     bool connected = false;
     int pollid = -1;
 
+    srt::sync::steady_clock::time_point entertime =
+        srt::sync::steady_clock::now();
+
     ifstream ifile(path, ios::binary);
     if ( !ifile )
     {
@@ -418,6 +424,7 @@ bool DoUpload(UriParser& ut, string path, string filename,
         }
     }
 
+    Verb() << "writed, total duration=" << srt::sync::count_milliseconds(srt::sync::steady_clock::now() - entertime);
     if (result && !cfg.skip_flushing)
     {
         assert(s != SRT_INVALID_SOCK);
@@ -441,11 +448,13 @@ bool DoUpload(UriParser& ut, string path, string filename,
                 result = true;
                 break;
             }
-            Verb() << "Sending buffer still: bytes=" << bytes << " blocks="
-                << blocks;
+            Verb() << "Sending buffer still: bytes=" << bytes
+                << " blocks=" << blocks
+                << " duration=" << srt::sync::count_milliseconds(srt::sync::steady_clock::now() - entertime);
             srt::sync::this_thread::sleep_for(srt::sync::milliseconds_from(250));
         }
     }
+    Verb() << "total duration=" << srt::sync::count_milliseconds(srt::sync::steady_clock::now() - entertime);
 
 exit:
     if (pollid >= 0)
@@ -466,9 +475,13 @@ bool DoDownload(UriParser& us, string directory, string filename,
     int pollid = -1;
     string id;
     ofstream ofile;
+    int total_recv_size = 0;
     SRT_SOCKSTATUS status;
     SRTSOCKET efd;
     int efdlen = 1;
+
+    srt::sync::steady_clock::time_point entertime =
+        srt::sync::steady_clock::now();
 
     pollid = srt_epoll_create();
     if ( pollid < 0 )
@@ -512,7 +525,7 @@ bool DoDownload(UriParser& us, string directory, string filename,
         assert(efdlen == 1);
 
         status = srt_getsockstate(s);
-        Verb() << "Event with status " << status << "\n";
+        //Verb() << "Event with status " << status << "\n";
 
         switch (status)
         {
@@ -590,6 +603,7 @@ bool DoDownload(UriParser& us, string directory, string filename,
                     goto exit;
                 }
                 cerr << "Writing output to [" << directory << "]" << endl;
+                entertime = srt::sync::steady_clock::now();
             }
 
             int n = src->Read(cfg.chunk_size, packet, out_stats);
@@ -603,11 +617,16 @@ bool DoDownload(UriParser& us, string directory, string filename,
             {
                 result = true;
                 cerr << "Download COMPLETE.\n";
+
+                Verb() << "Download: total " << total_recv_size;
+                Verb() << "total duration=" << srt::sync::count_milliseconds(srt::sync::steady_clock::now() - entertime);
                 break;
             }
 
             // Write to file any amount of data received
-            Verb() << "Download: --> " << n;
+            //Verb() << "Download: --> " << n;
+            total_recv_size += n;
+
             ofile.write(packet.payload.data(), n);
             if (!ofile.good())
             {
@@ -712,6 +731,9 @@ int main(int argc, char** argv)
         }
     }
 
+    srt::setloglevel(srt_logging::LogLevel::debug);
+    srt::addlogfa(SRT_LOGFA_APP);
+
     //
     // SRT stats output
     //
@@ -750,7 +772,10 @@ int main(int argc, char** argv)
                 cerr << "SRT to FILE should be specified\n";
                 return 1;
             }
+            //while (1) {
             Download(us, ut, cfg, out_stats);
+            //  srt::sync::this_thread::sleep_for(srt::sync::milliseconds_from(1000));
+            //}
         }
         else if (ut.scheme() == "srt")
         {
